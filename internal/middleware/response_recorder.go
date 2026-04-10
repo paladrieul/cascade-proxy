@@ -5,50 +5,53 @@ import (
 	"net/http"
 )
 
-// ResponseRecorder buffers the status code, headers, and body so that the
-// response can be inspected or discarded before being forwarded to the real
-// http.ResponseWriter.
+// ResponseRecorder wraps http.ResponseWriter to capture status code,
+// response headers, and the written body for inspection or caching.
 type ResponseRecorder struct {
-	Status  int
-	headers http.Header
-	body    bytes.Buffer
-	wroteHeader bool
+	http.ResponseWriter
+	status int
+	buf    bytes.Buffer
+	wrote  bool
 }
 
-// NewResponseRecorder returns a new ResponseRecorder. The underlying
-// http.ResponseWriter is NOT written to until Flush is called.
-func NewResponseRecorder(_ http.ResponseWriter) *ResponseRecorder {
-	return &ResponseRecorder{
-		Status:  http.StatusOK,
-		headers: make(http.Header),
+// NewResponseRecorder wraps w in a ResponseRecorder.
+func NewResponseRecorder(w http.ResponseWriter) *ResponseRecorder {
+	return &ResponseRecorder{ResponseWriter: w}
+}
+
+// WriteHeader captures the status code and forwards it to the underlying writer.
+func (r *ResponseRecorder) WriteHeader(code int) {
+	if !r.wrote {
+		r.status = code
+		r.wrote = true
+		r.ResponseWriter.WriteHeader(code)
 	}
 }
 
-func (r *ResponseRecorder) Header() http.Header {
-	return r.headers
-}
-
-func (r *ResponseRecorder) WriteHeader(statusCode int) {
-	if !r.wroteHeader {
-		r.Status = statusCode
-		r.wroteHeader = true
-	}
-}
-
+// Write captures the body bytes and forwards them to the underlying writer.
 func (r *ResponseRecorder) Write(b []byte) (int, error) {
-	if !r.wroteHeader {
-		r.wroteHeader = true
+	if !r.wrote {
+		r.WriteHeader(http.StatusOK)
 	}
-	return r.body.Write(b)
+	r.buf.Write(b) //nolint:errcheck
+	return r.ResponseWriter.Write(b)
 }
 
-// Flush copies the buffered response to the real http.ResponseWriter.
-func (r *ResponseRecorder) Flush(w http.ResponseWriter) {
-	for k, vals := range r.headers {
-		for _, v := range vals {
-			w.Header().Add(k, v)
-		}
+// Status returns the captured HTTP status code.
+// Returns 200 if WriteHeader was never called.
+func (r *ResponseRecorder) Status() int {
+	if r.status == 0 {
+		return http.StatusOK
 	}
-	w.WriteHeader(r.Status)
-	_, _ = w.Write(r.body.Bytes())
+	return r.status
+}
+
+// Body returns the captured response body.
+func (r *ResponseRecorder) Body() []byte {
+	return r.buf.Bytes()
+}
+
+// BytesWritten returns the number of body bytes written.
+func (r *ResponseRecorder) BytesWritten() int {
+	return r.buf.Len()
 }
