@@ -1,63 +1,72 @@
 package main
 
 import (
-	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
-	"github.com/example/cascade-proxy/internal/circuitbreaker"
-	"github.com/example/cascade-proxy/internal/middleware"
-	"github./internal/proxy"
-	"github.com//ratelimiter"
+	"github.com/user/cascade-proxy/internal/balancer"
+	"github.com/user/cascade-proxy/internal/circuitbreaker"
+	"github.com/user/cascade-proxy/internal/healthcheck"
+	"github.com/user/cascade-proxy/internal/middleware"
+	"github.com/user/cascade-proxy/internal/proxy"
+	"github.com/user/cascade-proxy/internal/ratelimiter"
 )
 
 func main() {
-	tget := os.Getenv("PROXY_TARGET" "" {
-		target = "http://localhost:8081"
-	}
+	logger := log.New(os.Stdout, "[cascade-proxy] ", log.LstdFlags)
 
-	addr := os.Getenv("PROXY_ADDR")
-	if addr == "" {
-		addr = ":8080"
-	}
+	targetURLs := strings.Split(envOr("BACKENDS", "http://localhost:9090"), ",")
 
-	logger := log.New(os.Stdout, "", log.LstdFlags)
-
-	// Build proxy
-	proxyCfg := proxy.DefaultConfig()
-	proxyCfg.TargetURL = target
-	p, err := proxy.New(proxyCfg)
+	bal, err := balancer.New(targetURLs)
 	if err != nil {
-		logger.Fatalf("failed to create proxy: %v", err)
+		logger.Fatalf("balancer: %v", err)
 	}
 
-	// Build circuit breaker
-	cbCfg := circuitbreaker.DefaultConfig()
-	cb := circuitbreaker.New(cbCfg)
-
-	// Build rate limiter
-	rlCfg := ratelimiter.DefaultConfig()
-	rl := ratelimiter.New(rlCfg)
-
-	// Chain middleware: logger -> rate limiter -> circuit breaker -> proxy
-	handler := middleware.Logger(logger,
-		middleware.NewRateLimitMiddleware(rl,
-			middleware.NewCircuitBreakerMiddleware(cb, p),
-		),
-	)
-
-	srv := &http.Server{
-		Addr:         addr,
-		Handler:      handler,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
+	p, err := proxy.New(proxy.DefaultConfig)
+	if err != nil {
+		logger.Fatalf("proxy: %v", err)
 	}
 
-	fmt.Printf("cascade-proxy listening on %s → %s\n", addr, target)
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		logger.Fatalf("server error: %v", err)
+	cb := circuitbreaker.New(circuitbreaker.DefaultConfig)
+	rl := ratelimiter.New(ratelimiter.DefaultConfig)
+
+	hc := healthcheck.New(targetURLs, healthcheck.Config{
+		Interval: 15 * time.Second,
+		Timeout:  3 * time.Second,
+	})
+	go hc.Start()
+
+	var h http.Handler = p
+	h = middleware.NewBalancerMiddleware(bal, h)
+	h = middleware.NewRetryMiddleware(middleware.DefaultRetryConfig, h)
+	h = middleware.NewCircuitBreakerMiddleware(cb, h)
+	h = middleware.NewRateLimitMiddleware(rl, h)
+	h = middleware.NewCacheMiddleware(middleware.DefaultCacheConfig, h)
+	h = middleware.NewCORSMiddleware(middleware.DefaultCORSConfig, h)
+	h = middleware.NewAuthMiddleware(middleware.DefaultAuthConfig, h)
+	h = middleware.NewCompressMiddleware(middleware.DefaultCompressConfig, h)
+	h = middleware.NewTimeoutMiddleware(middleware.DefaultTimeoutConfig, h)
+	h = middleware.NewRecoveryMiddleware(logger, h)
+	h = middleware.NewMetricsMiddleware(h)
+	h = middleware.Logger(logger, h)
+
+	mux := http.NewServeMux()
+	mux.Handle("/health", hc.Handler())
+	mux.Handle("/", h)
+
+	addr := envOr("ADDR", ":8080")
+	logger.Printf("listening on %s", addr)
+	if err := http.ListenAndServe(addr, mux); err != nil {
+		logger.Fatalf("server: %v", err)
 	}
+}
+
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }
