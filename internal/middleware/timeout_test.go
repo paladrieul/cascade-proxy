@@ -67,3 +67,27 @@ func TestTimeoutDefaultConfig(t *testing.T) {
 		t.Error("expected non-nil logger in default config")
 	}
 }
+
+func TestTimeoutExactBoundary(t *testing.T) {
+	// Verify that a handler completing just under the timeout is not cancelled.
+	const timeout = 100 * time.Millisecond
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(timeout / 2)
+		w.WriteHeader(http.StatusOK)
+	})
+
+	mw := newTestTimeoutMiddleware(timeout)
+	ts := httptest.NewServer(mw(handler))
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/boundary")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 for request within timeout, got %d", resp.StatusCode)
+	}
+}
