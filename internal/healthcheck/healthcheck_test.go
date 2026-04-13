@@ -102,3 +102,19 @@ func TestProbeUnreachableBackendIsUnhealthy(t *testing.T) {
 		t.Errorf("expected unreachable backend to be unhealthy")
 	}
 }
+
+func TestStatusesURLMatchesBackend(t *testing.T) {
+	backend := newHealthyBackend()
+	defer backend.Close()
+
+	checker := healthcheck.New([]string{backend.URL}, 2*time.Second)
+	checker.Probe(context.Background())
+
+	statuses := checker.Statuses()
+	if len(statuses) != 1 {
+		t.Fatalf("expected 1 status, got %d", len(statuses))
+	}
+	if statuses[0].URL != backend.URL {
+		t.Errorf("expected status URL %q, got %q", backend.URL, statuses[0].URL)
+	}
+}
